@@ -232,7 +232,8 @@ namespace lwsf { namespace internal { namespace http
     boost::beast::http::request<slice_body> request;
     const epee::net_utils::ssl_options_t ssl;
     boost::asio::ssl::context ssl_context;
-    boost::asio::ssl::stream<boost::asio::ip::tcp::socket> sock;
+    //! Replaced by `reset_stream()` before every connection attempt.
+    boost::optional<boost::asio::ssl::stream<boost::asio::ip::tcp::socket>> sock;
     boost::optional<boost::beast::http::parser<false, stream_body>> parser;
     std::size_t iteration;
     const std::uint16_t port;
@@ -252,14 +253,25 @@ namespace lwsf { namespace internal { namespace http
         request{},
         ssl(std::move(in)),
         ssl_context(ssl.create_context()),
-        sock(io, ssl_context),
+        sock(),
         parser(),
         iteration(0),
         port(port),
         is_connected(false),
         ssl_status(ssl.support),
         retry(true)
-    {}
+    {
+      reset_stream();
+    }
+
+    /*! Gives the next connection its own TLS state. OpenSSL cannot run a new
+      handshake on an `SSL` object that already carried a session: reusing it
+      sends records from the closed session to the new peer, and every request
+      after the server closes a connection fails. */
+    void reset_stream()
+    {
+      sock.emplace(strand.context(), ssl_context);
+    }
 
     template<typename F>
     void async_write(F&& callback)
@@ -292,9 +304,9 @@ namespace lwsf { namespace internal { namespace http
 
       request.prepare_payload();
       if (https)
-        boost::beast::http::async_write(sock, request, boost::asio::bind_executor(strand, std::forward<F>(callback)));
+        boost::beast::http::async_write(*sock, request, boost::asio::bind_executor(strand, std::forward<F>(callback)));
       else
-        boost::beast::http::async_write(sock.next_layer(), request, boost::asio::bind_executor(strand, std::forward<F>(callback)));
+        boost::beast::http::async_write(sock->next_layer(), request, boost::asio::bind_executor(strand, std::forward<F>(callback)));
     }
 
     template<typename F>
@@ -305,9 +317,9 @@ namespace lwsf { namespace internal { namespace http
       parser.emplace();
       parser->body_limit(config::http_body_limit);
       if (ssl_status == epee::net_utils::ssl_support_t::e_ssl_support_enabled)
-        boost::beast::http::async_read(sock, buffer, *parser, boost::asio::bind_executor(strand, std::forward<F>(callback)));
+        boost::beast::http::async_read(*sock, buffer, *parser, boost::asio::bind_executor(strand, std::forward<F>(callback)));
       else
-        boost::beast::http::async_read(sock.next_layer(), buffer, *parser, boost::asio::bind_executor(strand, std::forward<F>(callback)));
+        boost::beast::http::async_read(sock->next_layer(), buffer, *parser, boost::asio::bind_executor(strand, std::forward<F>(callback)));
     }
 
     void close()
@@ -319,8 +331,8 @@ namespace lwsf { namespace internal { namespace http
 
       boost::system::error_code ignore{};
       timer.cancel();
-      sock.next_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignore);
-      sock.next_layer().close(ignore);
+      sock->next_layer().shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignore);
+      sock->next_layer().close(ignore);
     }
 
     void notify_connection_error(const boost::system::error_code error)
@@ -408,16 +420,17 @@ namespace lwsf { namespace internal { namespace http
           if (!self.is_connected)
           {
   do_connect:
+            self.reset_stream();
             BOOST_ASIO_CORO_YIELD self.connect(self_, *this);
 
             if (!error && self.ssl_status != epee::net_utils::ssl_support_t::e_ssl_support_disabled)
             {
               ++self.iteration;
               set_timeout(self_, config::connect_timeout); // socks needs a reset
-              self.ssl.configure(self.sock, boost::asio::ssl::stream_base::client, self.host);
+              self.ssl.configure(*self.sock, boost::asio::ssl::stream_base::client, self.host);
 
               MDEBUG("Starting SSL handshake to " << self.host << " for HTTP");
-              BOOST_ASIO_CORO_YIELD self.sock.async_handshake(
+              BOOST_ASIO_CORO_YIELD self.sock->async_handshake(
                 boost::asio::ssl::stream<boost::asio::ip::tcp::socket>::client,
                   boost::asio::bind_executor(self.strand, std::move(*this))
               );
@@ -612,7 +625,7 @@ namespace lwsf { namespace internal { namespace http
           if (!error)
           {
             MDEBUG("Connecting to " << self.endpoint << " / " << self.host << " for HTTP");
-            BOOST_ASIO_CORO_YIELD self.sock.next_layer().async_connect(
+            BOOST_ASIO_CORO_YIELD self.sock->next_layer().async_connect(
               self.endpoint, boost::asio::bind_executor(self.strand, std::move(*this))
             );
 
@@ -645,7 +658,7 @@ namespace lwsf { namespace internal { namespace http
 
         if (error)
           MERROR("Failed socks connection: " << error.message());
-        self_->sock.next_layer() = std::move(sock);
+        self_->sock->next_layer() = std::move(sock);
 
         std::function<callback_func> f{std::move(f_)};
         boost::asio::dispatch(self_->strand, [f = std::move(f), error] { f(error); });
@@ -655,7 +668,7 @@ namespace lwsf { namespace internal { namespace http
     LWSF_VERIFY(self && f);
 
     std::shared_ptr<::net::socks::client> proxy = ::net::socks::make_connect_client(
-      std::move(self->sock.next_layer()), ::net::socks::version::v4a, handler{self, f}
+      std::move(self->sock->next_layer()), ::net::socks::version::v4a, handler{self, f}
     );
 
     bool is_set = false;
@@ -744,9 +757,9 @@ namespace lwsf { namespace internal { namespace http
           host = self->host + ":" + std::to_string(self->port);
 
         if (self->ssl_status == epee::net_utils::ssl_support_t::e_ssl_support_enabled)
-          websocket::async_start(std::move(self->sock), self->strand.context(), std::move(host), std::move(target_), std::move(protocol_), std::move(notifier_));
+          websocket::async_start(std::move(*self->sock), self->strand.context(), std::move(host), std::move(target_), std::move(protocol_), std::move(notifier_));
         else
-          websocket::async_start(std::move(self->sock.next_layer()), self->strand.context(), std::move(host), std::move(target_), std::move(protocol_), std::move(notifier_));
+          websocket::async_start(std::move(self->sock->next_layer()), self->strand.context(), std::move(host), std::move(target_), std::move(protocol_), std::move(notifier_));
       }
     };
  

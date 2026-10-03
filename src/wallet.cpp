@@ -917,24 +917,22 @@ namespace lwsf { namespace internal
           url.port = 80;
       }
 
-      // Configure SSL certificate verification
+      // Configure SSL certificate verification. A CA file, once set, is the
+      // only trust store: when it is missing or unreadable, creating the TLS
+      // context below throws and `init` fails, rather than quietly trusting
+      // whatever OpenSSL's compiled-in default location happens to hold.
       if (options.support != epee::net_utils::ssl_support_t::e_ssl_support_disabled)
       {
-        bool ca_file_valid = !ca_file_path_.empty() && boost::filesystem::exists(ca_file_path_);
-        
-        if (ca_file_valid) {
-          try {
-            options = epee::net_utils::ssl_options_t(
-              std::vector<std::vector<std::uint8_t>>{},
-              ca_file_path_
-            );
-            options.verification = epee::net_utils::ssl_verification_t::user_ca;
-          } catch (const std::exception& e) {
-            options.verification = epee::net_utils::ssl_verification_t::system_ca;
-          }
-        } else {
-          options.verification = epee::net_utils::ssl_verification_t::system_ca;
+        if (!ca_file_path_.empty())
+        {
+          options = epee::net_utils::ssl_options_t(
+            std::vector<std::vector<std::uint8_t>>{},
+            ca_file_path_
+          );
+          options.verification = epee::net_utils::ssl_verification_t::user_ca;
         }
+        else
+          options.verification = epee::net_utils::ssl_verification_t::system_ca;
       }
 
       // backend permanently assumes `/feed` failure even after changing
@@ -991,6 +989,10 @@ namespace lwsf { namespace internal
       const std::error_code error = wait_for<std::error_code>(
         [data = std::move(data)] (auto&& f) { backend::wallet::login(data, std::move(f)); }
       );
+      // Recorded so `errorString()` says why the login failed (a rejected
+      // certificate, a refused connection, ...) instead of reporting nothing,
+      // and cleared again once a login succeeds.
+      set_error(error, true);
       if (error)
         return false;
     }
