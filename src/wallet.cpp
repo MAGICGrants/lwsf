@@ -1667,10 +1667,25 @@ namespace lwsf { namespace internal
                 helps with UI as the transaction will appear immediately when
                 `pending_transaction->commit()` is performed. */
 
+              /* The amount sent, and to whom, come from `dests`: the amounts
+                this transaction was built with. `transfer_total` and
+                `transfers` were computed before the fee was settled against
+                a built transaction, and a sweep takes that fee out of its
+                destination. The change entry, when there is one, is last. */
+              LWSF_TX_VERIFY(!has_change || dests.back().original == change_address);
+              const std::size_t transfer_count = dests.size() - std::size_t(has_change);
+              safe_uint64_t sent_total{};
+              transfers_map sent_transfers{};
+              for (std::size_t i = 0; i < transfer_count; ++i)
+              {
+                sent_total += dests.at(i).amount;
+                sent_transfers.insert({dests.at(i).amount, dests.at(i).original});
+              }
+
               auto details = std::make_shared<backend::transaction>();
               details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
               details->timestamp = std::chrono::system_clock::now();
-              details->amount = transfer_total;
+              details->amount = sent_total;
               details->fee = get_tx_fee(tx);
 
               const std::uint64_t weight = get_transaction_weight(tx, details->raw_bytes.size());
@@ -1767,7 +1782,7 @@ namespace lwsf { namespace internal
 
               if (!tx_keys.empty())
               {             
-                auto rtransfers = transfers;
+                auto rtransfers = sent_transfers;
                 for (std::size_t i = 0; i < tx_keys.size(); ++i)
                 {
                   const auto& dest = rdests.at(i);
@@ -1782,7 +1797,7 @@ namespace lwsf { namespace internal
               }
               else
               {
-                for (auto& transfer : transfers)
+                for (auto& transfer : sent_transfers)
                   details->transfers.emplace_back(transfer.second, transfer.first).secret = tx_key;
               }
 
