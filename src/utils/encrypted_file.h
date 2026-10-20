@@ -44,6 +44,8 @@ namespace lwsf { namespace internal
   //! `file_magic` is pre-pended to file bytes for identification.
   expect<epee::byte_slice> encrypt(std::string_view file_magic, epee::byte_slice payload, std::uint64_t iterations, epee::span<const std::uint8_t> password);
 
-  //! Use `try_load` for to retrieve `contents`, then decrypt with `password`.
+  /*! Use `try_load` for to retrieve `contents`, then decrypt with `password`.
+    The result is the plaintext file in a buffer of its own; callers wipe it
+    once read, since freed memory keeps what was in it. */
   expect<epee::byte_slice> decrypt(epee::byte_slice contents, epee::span<const std::uint8_t> password);
 }} // lwsf // internal

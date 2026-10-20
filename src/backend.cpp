@@ -32,6 +32,7 @@
 #include <boost/asio/coroutine.hpp>
 #include <boost/numeric/conversion/cast.hpp>
 #include <boost/thread/lock_guard.hpp>
+#include <sodium/utils.h>
 #include <system_error>
 
 #include "crypto/crypto.h"     // monero/src
@@ -97,6 +98,34 @@ namespace lwsf { namespace internal { namespace backend
       if (std::numeric_limits<std::uint32_t>::max() - lookahead <= index)
         return std::numeric_limits<std::uint32_t>::max();
       return index + lookahead;
+    }
+
+    //! Overwrites every byte `str` holds, including any a move left past `size()`.
+    void wipe(std::string& str) noexcept
+    {
+      str.resize(str.capacity()); // never reallocates
+      sodium_memzero(str.data(), str.size());
+      str.clear();
+    }
+
+    //! Overwrites the bytes of `bytes`; only for a buffer nothing else still reads.
+    void wipe(const epee::byte_slice& bytes) noexcept
+    {
+      if (!bytes.empty())
+        sodium_memzero(const_cast<std::uint8_t*>(bytes.data()), bytes.size());
+    }
+
+    //! Wipes `bytes` when leaving scope, by return or by throw.
+    struct wipe_on_exit
+    {
+      epee::byte_slice bytes;
+      ~wipe_on_exit() { wipe(bytes); }
+    };
+
+    //! \return Copy of `bytes` in a buffer of its own.
+    epee::byte_slice copy_bytes(const epee::byte_slice& bytes)
+    {
+      return epee::byte_slice{{bytes.data(), bytes.size()}};
     }
 
     cryptonote::network_type convert_net_type(const Monero::NetworkType in)
@@ -1267,6 +1296,37 @@ namespace lwsf { namespace internal { namespace backend
   void write_bytes(wire::writer& dest, const account& source)
   { map_account(dest, source); }
 
+  account::polyseed::polyseed(epee::byte_slice new_seed, std::string&& new_passphrase) noexcept
+    : seed(std::move(new_seed)), passphrase(std::move(new_passphrase))
+  {
+    wipe(new_passphrase); // a short string is copied by a move, not handed over
+  }
+
+  account::polyseed::polyseed(polyseed&& rhs) noexcept
+    : seed(std::move(rhs.seed)), passphrase(std::move(rhs.passphrase))
+  {
+    wipe(rhs.passphrase);
+  }
+
+  account::polyseed& account::polyseed::operator=(polyseed&& rhs) noexcept
+  {
+    if (this != std::addressof(rhs))
+    {
+      wipe(seed);
+      wipe(passphrase);
+      seed = std::move(rhs.seed);
+      passphrase = std::move(rhs.passphrase);
+      wipe(rhs.passphrase);
+    }
+    return *this;
+  }
+
+  account::polyseed::~polyseed()
+  {
+    wipe(seed);
+    wipe(passphrase);
+  }
+
   std::uint64_t account::needed_subaddresses(boost::container::flat_map<std::uint32_t, rpc::subaddrs> subaddrs) const
   {
     if (this->lookahead.major == 0 || this->lookahead.minor == 0)
@@ -1581,11 +1641,18 @@ namespace lwsf { namespace internal { namespace backend
     epee::byte_stream dest{};
     dest.reserve(config::initial_buffer_size);
 
+    /* TODO: a wallet bigger than this reservation grows `dest` by realloc,
+      which may copy the plaintext (the seed and passphrase are written
+      first) and free the old block unwiped. Sizing `dest` exactly before
+      writing (a counting pass, or a size hint from the last load or store)
+      would keep every copy wipeable. */
     const boost::lock_guard<boost::mutex> lock{sync};
     const std::error_code error = wire::msgpack::to_bytes(dest, primary);
     if (error)
       return error;
-    return epee::byte_slice{std::move(dest)}; 
+    // No shrink: a realloc may copy the plaintext and free the old block
+    // unwiped. `encrypt` wipes and frees this buffer right after anyway.
+    return epee::byte_slice{std::move(dest), false};
   }
 
   std::error_code wallet::from_bytes(epee::byte_slice source)
@@ -1593,10 +1660,25 @@ namespace lwsf { namespace internal { namespace backend
     /* The move call shouldn't throw an exception. So either the entire
       contents of the file get loaded, or the wallet remains unchanged. */
 
+    /* `source` is the plaintext wallet file (keys, seed, passphrase). msgpack
+      reads binary fields as slices of it, which would keep all of it alive
+      as long as the wallet; those fields get copies of their own below. It is
+      then wiped before release, since freed memory keeps what was in it.
+      Declared before `reload` so the wipe runs last, even on a throw. */
+    const wipe_on_exit plaintext{source.clone()};
+
     account reload{};
     std::error_code status = wire::msgpack::from_bytes(std::move(source), reload);
     if (!status)
     {
+      if (reload.poly)
+        reload.poly->seed = copy_bytes(reload.poly->seed);
+      for (auto& tx : reload.txes)
+      {
+        if (tx.second)
+          tx.second->raw_bytes = copy_bytes(tx.second->raw_bytes);
+      }
+
       const boost::lock_guard<boost::mutex> lock{sync};
       primary = std::move(reload);
       blockchain_height = primary.scan_height;

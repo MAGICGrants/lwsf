@@ -43,6 +43,7 @@
 #include <exception>
 #include <sodium/core.h>
 #include <sodium/randombytes.h>
+#include <sodium/utils.h>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -506,7 +507,13 @@ namespace lwsf { namespace internal
     epee::byte_slice file = try_load(path, wallet_file_magic);
     if (file.empty())
       return false;
-    return bool(decrypt(try_load(path, wallet_file_magic), epee::strspan<std::uint8_t>(password)));
+    const auto plaintext = decrypt(std::move(file), epee::strspan<std::uint8_t>(password));
+    if (!plaintext)
+      return false;
+    // Only the check was wanted, but this is the whole decrypted wallet file
+    // (keys and seed): overwritten before it is freed.
+    sodium_memzero(const_cast<std::uint8_t*>(plaintext->data()), plaintext->size());
+    return true;
   }
 
   std::vector<std::string> wallet::find(const std::string& path)
@@ -716,6 +723,9 @@ namespace lwsf { namespace internal
     stop_refresh_loop();
     if (data_.wallet)
       data_.wallet->shutdown();
+    // The password opens the wallet file, and so its keys: overwritten before
+    // std::string lets it go, since freed memory keeps what was in it.
+    sodium_memzero(password_.data(), password_.size());
   }
 
   void wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
@@ -815,6 +825,7 @@ namespace lwsf { namespace internal
 
   bool wallet::setPassword(const std::string &password)
   {
+    sodium_memzero(password_.data(), password_.size());
     password_ = password;
     return true;
   }
@@ -917,24 +928,22 @@ namespace lwsf { namespace internal
           url.port = 80;
       }
 
-      // Configure SSL certificate verification
+      // Configure SSL certificate verification. A CA file, once set, is the
+      // only trust store: when it is missing or unreadable, creating the TLS
+      // context below throws and `init` fails, rather than quietly trusting
+      // whatever OpenSSL's compiled-in default location happens to hold.
       if (options.support != epee::net_utils::ssl_support_t::e_ssl_support_disabled)
       {
-        bool ca_file_valid = !ca_file_path_.empty() && boost::filesystem::exists(ca_file_path_);
-        
-        if (ca_file_valid) {
-          try {
-            options = epee::net_utils::ssl_options_t(
-              std::vector<std::vector<std::uint8_t>>{},
-              ca_file_path_
-            );
-            options.verification = epee::net_utils::ssl_verification_t::user_ca;
-          } catch (const std::exception& e) {
-            options.verification = epee::net_utils::ssl_verification_t::system_ca;
-          }
-        } else {
-          options.verification = epee::net_utils::ssl_verification_t::system_ca;
+        if (!ca_file_path_.empty())
+        {
+          options = epee::net_utils::ssl_options_t(
+            std::vector<std::vector<std::uint8_t>>{},
+            ca_file_path_
+          );
+          options.verification = epee::net_utils::ssl_verification_t::user_ca;
         }
+        else
+          options.verification = epee::net_utils::ssl_verification_t::system_ca;
       }
 
       // backend permanently assumes `/feed` failure even after changing
@@ -991,6 +1000,10 @@ namespace lwsf { namespace internal
       const std::error_code error = wait_for<std::error_code>(
         [data = std::move(data)] (auto&& f) { backend::wallet::login(data, std::move(f)); }
       );
+      // Recorded so `errorString()` says why the login failed (a rejected
+      // certificate, a refused connection, ...) instead of reporting nothing,
+      // and cleared again once a login succeeds.
+      set_error(error, true);
       if (error)
         return false;
     }
@@ -1665,10 +1678,25 @@ namespace lwsf { namespace internal
                 helps with UI as the transaction will appear immediately when
                 `pending_transaction->commit()` is performed. */
 
+              /* The amount sent, and to whom, come from `dests`: the amounts
+                this transaction was built with. `transfer_total` and
+                `transfers` were computed before the fee was settled against
+                a built transaction, and a sweep takes that fee out of its
+                destination. The change entry, when there is one, is last. */
+              LWSF_TX_VERIFY(!has_change || dests.back().original == change_address);
+              const std::size_t transfer_count = dests.size() - std::size_t(has_change);
+              safe_uint64_t sent_total{};
+              transfers_map sent_transfers{};
+              for (std::size_t i = 0; i < transfer_count; ++i)
+              {
+                sent_total += dests.at(i).amount;
+                sent_transfers.insert({dests.at(i).amount, dests.at(i).original});
+              }
+
               auto details = std::make_shared<backend::transaction>();
               details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
               details->timestamp = std::chrono::system_clock::now();
-              details->amount = transfer_total;
+              details->amount = sent_total;
               details->fee = get_tx_fee(tx);
 
               const std::uint64_t weight = get_transaction_weight(tx, details->raw_bytes.size());
@@ -1765,7 +1793,7 @@ namespace lwsf { namespace internal
 
               if (!tx_keys.empty())
               {             
-                auto rtransfers = transfers;
+                auto rtransfers = sent_transfers;
                 for (std::size_t i = 0; i < tx_keys.size(); ++i)
                 {
                   const auto& dest = rdests.at(i);
@@ -1780,7 +1808,7 @@ namespace lwsf { namespace internal
               }
               else
               {
-                for (auto& transfer : transfers)
+                for (auto& transfer : sent_transfers)
                   details->transfers.emplace_back(transfer.second, transfer.first).secret = tx_key;
               }
 

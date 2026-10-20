@@ -243,10 +243,20 @@ namespace lwsf { namespace internal { namespace backend
     //! \return # subaddresses needed for `lookahead, `txes`, and `subaddrs`.
     std::uint64_t needed_subaddresses(boost::container::flat_map<std::uint32_t, rpc::subaddrs> subaddrs) const;
 
+    /*! The seed and passphrase lead to the spend key, so both are overwritten
+      when destroyed or replaced; freed memory keeps what was in it. A move
+      also wipes what is left behind in the source. */
     struct polyseed
     {
-      epee::byte_slice seed;
+      epee::byte_slice seed; //!< Owns its buffer (never a slice of another), since it gets wiped
       std::string passphrase;
+
+      polyseed() = default;
+      //! Takes `new_passphrase`, and wipes what the move leaves in it.
+      polyseed(epee::byte_slice new_seed, std::string&& new_passphrase) noexcept;
+      polyseed(polyseed&& rhs) noexcept;
+      polyseed& operator=(polyseed&& rhs) noexcept;
+      ~polyseed();
     };
 
     std::string address; //!< not serialized, recovered on read_bytes
@@ -348,7 +358,9 @@ namespace lwsf { namespace internal { namespace backend
     //! Serialize `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
 
-    //! De-serialize `this` from msgpack. Locks+replaces contents.
+    /*! De-serialize `this` from msgpack. Locks+replaces contents. `source`
+      is a decrypted wallet file, so its bytes are wiped once read; do not
+      pass a buffer that is still needed. */
     std::error_code from_bytes(epee::byte_slice source);
 
     //! Do not hold `sync` or `sync_listener`

@@ -28,6 +28,7 @@
 #include "framework.test.h"
 #include "backend.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <boost/asio/coroutine.hpp>
@@ -423,6 +424,84 @@ LWS_CASE("backend::account")
       majors.try_emplace(50, subaddrs{}).first->second.value = {{199, 201}};
 
       EXPECT(account.needed_subaddresses(majors) == 10005);
+    }
+  }
+}
+
+LWS_CASE("backend::wallet::from_bytes wipes the file")
+{
+  using polyseed = lwsf::internal::backend::account::polyseed;
+  const auto all_zero = [] (const epee::byte_slice& bytes)
+  {
+    return std::all_of(bytes.begin(), bytes.end(), [] (const std::uint8_t b) { return b == 0; });
+  };
+
+  SETUP("wallet with polyseed and a held send")
+  {
+    boost::asio::io_context io;
+    const auto original = std::make_shared<lwsf::internal::backend::wallet>(io);
+    crypto::generate_keys(original->primary.view.pub, original->primary.view.sec);
+    crypto::generate_keys(original->primary.spend.pub, original->primary.spend.sec);
+
+    std::array<std::uint8_t, 32> seed{};
+    for (std::size_t i = 0; i < seed.size(); ++i)
+      seed[i] = std::uint8_t(i + 1);
+    const std::string passphrase = "a passphrase longer than any short string buffer";
+    original->primary.poly = polyseed{epee::byte_slice{{seed.data(), seed.size()}}, std::string{passphrase}};
+
+    const std::array<std::uint8_t, 4> raw{{0xde, 0xad, 0xbe, 0xef}};
+    auto tx = std::make_shared<lwsf::internal::backend::transaction>();
+    tx->raw_bytes = epee::byte_slice{{raw.data(), raw.size()}};
+    original->primary.txes.try_emplace(tx->id, tx);
+
+    auto bytes = original->to_bytes();
+    EXPECT(bytes.has_value());
+    const epee::byte_slice file = bytes->clone(); // second reference, to see the wipe
+    EXPECT(!all_zero(file));
+
+    const auto loaded = std::make_shared<lwsf::internal::backend::wallet>(io);
+    EXPECT(loaded->from_bytes(std::move(*bytes)) == std::error_code{});
+    EXPECT(all_zero(file));
+
+    EXPECT(loaded->primary.poly.has_value());
+    const epee::byte_slice& loaded_seed = loaded->primary.poly->seed;
+    EXPECT(std::equal(seed.begin(), seed.end(), loaded_seed.begin(), loaded_seed.end()));
+    EXPECT(loaded->primary.poly->passphrase == passphrase);
+
+    EXPECT(loaded->primary.txes.size() == 1u);
+    const epee::byte_slice& loaded_raw = loaded->primary.txes.begin()->second->raw_bytes;
+    EXPECT(std::equal(raw.begin(), raw.end(), loaded_raw.begin(), loaded_raw.end()));
+
+    SECTION("seed wiped when replaced")
+    {
+      const epee::byte_slice old_seed = loaded_seed.clone();
+      loaded->primary.poly = polyseed{epee::byte_slice{{raw.data(), raw.size()}}, std::string{"other"}};
+      EXPECT(all_zero(old_seed));
+      EXPECT(loaded->primary.poly->passphrase == "other");
+    }
+
+    SECTION("seed wiped when destroyed")
+    {
+      const epee::byte_slice old_seed = loaded_seed.clone();
+      loaded->primary.poly.reset();
+      EXPECT(all_zero(old_seed));
+    }
+
+    SECTION("seed wiped when the account is reloaded")
+    {
+      const epee::byte_slice old_seed = loaded_seed.clone();
+      original->primary.poly.reset();
+      EXPECT(loaded->from_bytes(original->to_bytes().value()) == std::error_code{});
+      EXPECT(!loaded->primary.poly.has_value());
+      EXPECT(all_zero(old_seed));
+    }
+
+    SECTION("file wiped when parsing fails")
+    {
+      const epee::byte_slice whole = original->to_bytes().value();
+      EXPECT(loaded->from_bytes(whole.get_slice(0, whole.size() - 1)) != std::error_code{});
+      EXPECT(all_zero(whole.get_slice(0, whole.size() - 1)));
+      EXPECT(loaded->primary.poly->passphrase == passphrase); // unchanged
     }
   }
 }

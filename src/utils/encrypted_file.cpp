@@ -32,6 +32,7 @@
 #include <sodium/core.h>
 #include <sodium/crypto_pwhash_argon2id.h>
 #include <sodium/randombytes.h>
+#include <sodium/utils.h>
 #include <sodium/crypto_aead_chacha20poly1305.h>
 #include <stdexcept>
 
@@ -143,18 +144,20 @@ namespace lwsf { namespace internal
           memory_limit()
         };
 
-        const auto key = out.get_key(password);
+        auto key = out.get_key(password);
 
         epee::byte_stream buffer;
         buffer.put_n(0, upayload.size() + tag_size());
 
         unsigned long long out_bytes = buffer.size();
-        if (crypto_aead_chacha20poly1305_ietf_encrypt(
+        const int status = crypto_aead_chacha20poly1305_ietf_encrypt(
           buffer.data(), std::addressof(out_bytes),
           upayload.data(), upayload.size(),
           nullptr, 0,
           nullptr,
-          out.nonce.data(), key.data()) != 0)
+          out.nonce.data(), key.data());
+        sodium_memzero(key.data(), key.size());
+        if (status != 0)
         {
           // this should basically never happen, so throw
           throw std::runtime_error{std::string{cipher_name()} + " encryption failed"};
@@ -181,7 +184,7 @@ namespace lwsf { namespace internal
         if (sodium_init() < 0)
           throw std::runtime_error{"Failed to initialize libsodium"};
 
-        const auto key = get_key(password);
+        auto key = get_key(password);
         static_assert(key_size() == key.size());
 
         epee::byte_stream buffer;
@@ -192,13 +195,16 @@ namespace lwsf { namespace internal
         );
 
         unsigned long long out_bytes = buffer.size();
-        if (crypto_aead_chacha20poly1305_ietf_decrypt(
+        const int status = crypto_aead_chacha20poly1305_ietf_decrypt(
           buffer.data(), std::addressof(out_bytes),
           nullptr,
           epayload.data(), epayload.size(),
           nullptr, 0,
-          nonce.data(), key.data()) != 0)
+          nonce.data(), key.data());
+        sodium_memzero(key.data(), key.size());
+        if (status != 0)
         {
+          sodium_memzero(buffer.data(), buffer.size());
           return nullptr;
         }
 
@@ -260,6 +266,10 @@ namespace lwsf { namespace internal
   {
     const auto contents = encrypted_file::make(payload, iterations, password);
     const std::size_t payload_size = payload.size();
+    // The plaintext (a wallet file: its keys and seed) is overwritten before
+    // it is let go; freed memory keeps what was written to it. Every caller
+    // hands over a buffer of its own, which nothing else reads.
+    sodium_memzero(const_cast<std::uint8_t*>(payload.data()), payload.size());
     payload = nullptr; // free up some memory that is no longer needed
 
     epee::byte_stream buffer;
