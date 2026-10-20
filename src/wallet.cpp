@@ -43,6 +43,7 @@
 #include <exception>
 #include <sodium/core.h>
 #include <sodium/randombytes.h>
+#include <sodium/utils.h>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -506,7 +507,13 @@ namespace lwsf { namespace internal
     epee::byte_slice file = try_load(path, wallet_file_magic);
     if (file.empty())
       return false;
-    return bool(decrypt(try_load(path, wallet_file_magic), epee::strspan<std::uint8_t>(password)));
+    const auto plaintext = decrypt(std::move(file), epee::strspan<std::uint8_t>(password));
+    if (!plaintext)
+      return false;
+    // Only the check was wanted, but this is the whole decrypted wallet file
+    // (keys and seed): overwritten before it is freed.
+    sodium_memzero(const_cast<std::uint8_t*>(plaintext->data()), plaintext->size());
+    return true;
   }
 
   std::vector<std::string> wallet::find(const std::string& path)
@@ -716,6 +723,9 @@ namespace lwsf { namespace internal
     stop_refresh_loop();
     if (data_.wallet)
       data_.wallet->shutdown();
+    // The password opens the wallet file, and so its keys: overwritten before
+    // std::string lets it go, since freed memory keeps what was in it.
+    sodium_memzero(password_.data(), password_.size());
   }
 
   void wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
@@ -815,6 +825,7 @@ namespace lwsf { namespace internal
 
   bool wallet::setPassword(const std::string &password)
   {
+    sodium_memzero(password_.data(), password_.size());
     password_ = password;
     return true;
   }
