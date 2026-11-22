@@ -144,19 +144,35 @@ namespace lwsf { namespace internal
 
     try
     {
+      std::size_t sent = 0;
       for (auto e : local_)
       {
-        const auto error = data_.context->wait_for<std::error_code>(
+        const auto result = data_.context->wait_for<backend::send_result>(
           [this, &e] (auto&& f)
           { backend::wallet::send_tx(this->data_.wallet, e->raw_bytes.clone(), std::move(f)); }
         );
-        if (error)
+        if (result.error)
         {
-          error_ = error.message();
+          if (sent)
+          {
+            /* Earlier txes are out, so neither "rejected" nor "not sent" is
+              true of the whole send. Keep the detail out of `error_`, so a
+              caller matching on it sees an unknown outcome. */
+            MERROR("Sending tx " << (sent + 1) << " of " << local_.size() << " failed: " << result.error.message() << ' ' << result.reason);
+            error_ = "Sent " + std::to_string(sent) + " of " + std::to_string(local_.size()) + " transactions before an error";
+          }
+          else
+          {
+            // Same form as wallet2's "... rejected by daemon ... Reason: ..."
+            error_ = result.error.message();
+            if (!result.reason.empty())
+              error_ += ". Reason: " + result.reason;
+          }
           return false;
         }
 
         data_.wallet->add_pending_tx(std::move(e));
+        ++sent;
       }
     }
     catch(const std::exception& e)

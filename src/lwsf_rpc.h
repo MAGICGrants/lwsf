@@ -715,8 +715,43 @@ namespace lwsf { namespace internal { namespace rpc
     static constexpr const char* endpoint() noexcept { return "/submit_raw_tx"; }
 
     std::string status;
+    std::string reason; //!< The daemon's reason with HTTP 422; "Not relayed" on some 200s
   };
   void read_bytes(wire::json_reader&, submit_raw_tx_response&);
+
+  /*! monero-lws replies HTTP 422 with `{"status":"Failed","reason":...}` when
+    the daemon rejects the tx. The generic `unpacker` drops error bodies; this
+    one also reads the body of a 422 so the caller can report the reason. The
+    HTTP error is still given to `f`. */
+  template<typename F>
+  struct unpacker<submit_raw_tx_response, F>
+  {
+    submit_raw_tx_response* out;
+    F f;
+
+    void operator()(std::error_code error, epee::byte_slice response)
+    {
+      LWSF_VERIFY(out);
+      if (!error || error == http::error(422))
+      {
+        const std::error_code parse_error = wire::json::from_bytes(
+          {reinterpret_cast<const char*>(response.data()), response.size()}, *out
+        );
+        if (parse_error)
+        {
+          MERROR("Failed to unpack /submit_raw_tx response: " << parse_error.message());
+          if (!error)
+            error = parse_error;
+          else
+          {
+            out->status.clear();
+            out->reason.clear();
+          }
+        }
+      }
+      f(error);
+    }
+  };
 
 
   struct upsert_subaddrs_request

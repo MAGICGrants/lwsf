@@ -56,6 +56,7 @@ namespace http
   }
 
   struct client_state;
+  //! On an HTTP status error, the (possibly empty) response body is still given.
   using server_response_func = void(std::error_code, epee::byte_slice);
   using callback_func = void(boost::system::error_code);
   using connect_func = void(std::shared_ptr<client_state>, std::function<callback_func>);

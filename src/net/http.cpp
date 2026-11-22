@@ -483,10 +483,13 @@ namespace lwsf { namespace internal { namespace http
               {
                 const auto result = self.parser->get().result_int();
                 MERROR(self.outgoing.front() << " returned " << result << " status code");
+                // The body is passed on too: some endpoints explain the error
+                // in it (e.g. `/submit_raw_tx` HTTP 422). Most callers ignore it.
+                epee::byte_slice body{std::move(self.parser->get()).body()};
                 if (0 < result && result <= std::numeric_limits<int>::max())
-                  self.outgoing.front().notifier(http::error(result), epee::byte_slice{});
+                  self.outgoing.front().notifier(http::error(result), std::move(body));
                 else
-                  self.outgoing.front().notifier(http::error::invalid_code, epee::byte_slice{});
+                  self.outgoing.front().notifier(http::error::invalid_code, std::move(body));
               }
               else
               {

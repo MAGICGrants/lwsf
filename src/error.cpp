@@ -62,6 +62,8 @@ namespace lwsf
       return "Mismatch on network type";
     case error::send_not_ok:
       return "send_tx status was NOT ok";
+    case error::send_rejected:
+      return "Transaction was rejected by daemon";
     case error::subaddr_ahead:
       return "server has limits too low for requested subaddress lookahead";
     case error::subaddr_disabled:

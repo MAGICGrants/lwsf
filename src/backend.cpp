@@ -89,6 +89,27 @@ namespace lwsf { namespace internal { namespace backend
     constexpr const auto rpc_max_subaddresses = http::error(409);
     constexpr const auto rpc_internal_error = http::error(500);
     constexpr const auto rpc_not_implemented = http::error(501);
+    constexpr const auto rpc_tx_rejected = http::error(422);
+
+    //! Longest daemon reason kept; monerod's longest (all flags) is ~170 chars.
+    constexpr const std::size_t max_reject_reason = 256;
+
+    /*! The reject reason is text from the server, shown to the user. Keep it
+      short and printable ASCII (monerod's reasons are) so it cannot carry
+      control characters or invalid UTF-8 into the app. */
+    std::string printable_reason(const std::string& source)
+    {
+      std::string out;
+      out.reserve(std::min(source.size(), max_reject_reason));
+      for (const char c : source)
+      {
+        if (out.size() == max_reject_reason)
+          break;
+        const unsigned char u = static_cast<unsigned char>(c);
+        out.push_back((0x20 <= u && u <= 0x7e) ? c : '?');
+      }
+      return out;
+    }
 
     template<typename T, typename U>
     std::uint32_t add_uint32_clamp(const T index, const U lookahead)
@@ -2458,16 +2479,16 @@ namespace lwsf { namespace internal { namespace backend
     handler{std::make_shared<frame>(std::move(self), std::move(req), std::move(f))}();
   }
 
-  void wallet::send_tx(std::shared_ptr<wallet> self, epee::byte_slice tx_bytes, std::function<void(std::error_code)> f)
+  void wallet::send_tx(std::shared_ptr<wallet> self, epee::byte_slice tx_bytes, std::function<void(send_result)> f)
   {
     struct frame
     {
       const std::weak_ptr<wallet> self;
-      const std::function<void(std::error_code)> f;
+      const std::function<void(send_result)> f;
       epee::byte_slice tx_bytes;
       rpc::submit_raw_tx_response response;
 
-      explicit frame(std::shared_ptr<wallet>&& self, epee::byte_slice&& tx_bytes, std::function<void(std::error_code)>&& f)
+      explicit frame(std::shared_ptr<wallet>&& self, epee::byte_slice&& tx_bytes, std::function<void(send_result)>&& f)
         : self(std::move(self)), f(std::move(f)), tx_bytes(std::move(tx_bytes)), response{}
       {}
     };
@@ -2494,12 +2515,23 @@ namespace lwsf { namespace internal { namespace backend
             std::addressof(frame_->response),
             *this
           );
-          if (error)
-            frame_->f(error);
+          // monero-lws (since #300) answers a daemon rejection with HTTP 422
+          // and `{"status":"Failed","reason":...}`. Any other error, including
+          // a 422 without that body, keeps its plain error code.
+          if (error == rpc_tx_rejected && ascii_nocase_compare(frame_->response.status, "Failed") && !frame_->response.reason.empty())
+            frame_->f({error::send_rejected, printable_reason(frame_->response.reason)});
+          else if (error)
+            frame_->f({error, {}});
           else if (!ascii_nocase_compare(frame_->response.status, "OK"))
-            frame_->f(error::send_not_ok);
+            frame_->f({error::send_not_ok, {}});
           else
+          {
+            // "Not relayed": the daemon accepted it without relaying, which
+            // in practice means it already had the tx. Still a success.
+            if (!frame_->response.reason.empty())
+              MINFO("/submit_raw_tx OK with reason: " << printable_reason(frame_->response.reason));
             frame_->f({});
+          }
         }
       }
     };

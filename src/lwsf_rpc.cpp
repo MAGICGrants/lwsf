@@ -613,7 +613,7 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, submit_raw_tx_response& self)
   {
-    wire::object(source, LWSF_WIRE_FIELD(status));
+    wire::object(source, LWSF_WIRE_FIELD(status), LWSF_WIRE_FIELD_DEFAULTED(reason, std::string{}));
   }
 
 

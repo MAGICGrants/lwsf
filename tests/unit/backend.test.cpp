@@ -207,8 +207,12 @@ namespace
       boost::beast::flat_buffer buffer;
       boost::optional<client_request> request;
       boost::beast::http::response<boost::beast::http::string_body> response;
+      //! A non-200 status that also has a body
+      using status_body = std::pair<boost::beast::http::status, std::string>;
+      using response_type = boost::variant<std::string, boost::beast::http::status, status_body>;
+
       std::deque<std::pair<std::string, std::string>> requests;
-      std::deque<boost::variant<std::string, boost::beast::http::status>> responses;
+      std::deque<response_type> responses;
       std::shared_ptr<lwsf_test::net::push::connection> ws;
 
       explicit frame(lest::env& lest_env, boost::asio::io_context& io)
@@ -258,12 +262,15 @@ namespace
 
           {
             LWSF_VERIFY(!self->responses.empty());
-            boost::variant<std::string, boost::beast::http::status> response;
+            frame::response_type response;
             response.swap(self->responses.front());
             self->responses.pop_front();
             {
               const auto string = boost::get<std::string>(std::addressof(response));
-              if (!string)
+              const auto with_body = boost::get<frame::status_body>(std::addressof(response));
+              if (with_body)
+                self->response = {with_body->first, 11, with_body->second};
+              else if (!string)
               {
                 const auto status = boost::get<boost::beast::http::status>(response);
                 if (status == boost::beast::http::status::switching_protocols)
@@ -526,14 +533,13 @@ LWS_CASE("backend::wallet (non-websocket)")
     SECTION("uninitialized http client")
     {
       using namespace std::placeholders;
-      const std::array<std::pair<std::function<void(std::function<void(std::error_code)>)>, std::string>, 6> funcs1
+      const std::array<std::pair<std::function<void(std::function<void(std::error_code)>)>, std::string>, 5> funcs1
       {{
         {std::bind(bwallet::refresh, wallet, true, _1), "refresh"},
         {std::bind(bwallet::get_fees, wallet, _1), "get_fees"},
         {std::bind(bwallet::register_subaccount, wallet, 0, _1), "register_subaccount"},
         {std::bind(bwallet::register_subaddress, wallet, 0, 0, _1), "register_subaddress"},
-        {std::bind(bwallet::set_lookahead, wallet, 0, 0, _1), "set_lookahead"},
-        {std::bind(bwallet::send_tx, wallet, empty_slice{}, _1), "send_tx"}
+        {std::bind(bwallet::set_lookahead, wallet, 0, 0, _1), "set_lookahead"}
       }};
 
       for (const auto& func : funcs1)
@@ -567,6 +573,143 @@ LWS_CASE("backend::wallet (non-websocket)")
       io.restart();
       io.run();
       EXPECT(actual == common_error::kInvalidArgument);
+
+      lwsf::internal::backend::send_result sent{};
+      bwallet::send_tx(wallet, empty_slice{}, [&] (auto result) { sent = std::move(result); });
+      io.restart();
+      io.run();
+      EXPECT(sent.error == common_error::kInvalidArgument);
+      EXPECT(sent.reason.empty());
+    }
+
+    SECTION("send_tx")
+    {
+      using status = boost::beast::http::status;
+      using status_body = response_loop::frame::status_body;
+
+      const auto frame = std::make_shared<response_loop::frame>(lest_env, io);
+      wallet->client.init(io, "127.0.0.1", "", acceptor.local_endpoint().port(), no_ssl);
+
+      bool done = false;
+      lwsf::internal::backend::send_result result{};
+      bwallet::send_tx(wallet, empty_slice{}, [&] (auto val) { done = true; result = std::move(val); });
+      acceptor.async_accept(frame->server, response_loop{frame});
+      frame->requests = {{"/submit_raw_tx", ""}};
+
+      SECTION("relayed")
+      {
+        frame->responses = {R"({"status": "OK"})"};
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == std::error_code{});
+        EXPECT(result.reason.empty());
+      }
+
+      SECTION("accepted but not relayed is success")
+      {
+        frame->responses = {R"({"status":"OK","reason":"Not relayed","not_relayed":true})"};
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == std::error_code{});
+        EXPECT(result.reason.empty());
+      }
+
+      SECTION("422 rejection keeps the daemon reason")
+      {
+        frame->responses = {status_body{status::unprocessable_entity, R"({"status":"Failed","reason":"double spend and fee too low"})"}};
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == lwsf::error::send_rejected);
+        EXPECT(result.error.message() == "Transaction was rejected by daemon");
+        EXPECT(result.reason == "double spend and fee too low");
+      }
+
+      SECTION("422 rejection reason is made printable and short")
+      {
+        frame->responses = {
+          status_body{status::unprocessable_entity, "{\"status\":\"Failed\",\"reason\":\"a\\u0007b\xc3\xa9" "c" + std::string(300, 'x') + "\"}"}
+        };
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == lwsf::error::send_rejected);
+        EXPECT(result.reason == "a?b??c" + std::string(250, 'x'));
+      }
+
+      SECTION("422 without a body")
+      {
+        frame->responses = {status::unprocessable_entity};
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == lwsf::internal::http::error(422));
+        EXPECT(result.reason.empty());
+      }
+
+      SECTION("422 with an unexpected body")
+      {
+        frame->responses = {status_body{status::unprocessable_entity, "<html>Unprocessable</html>"}};
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == lwsf::internal::http::error(422));
+        EXPECT(result.reason.empty());
+      }
+
+      SECTION("500 from older servers stays a plain HTTP error")
+      {
+        frame->responses = {status::internal_server_error};
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == lwsf::internal::http::error(500));
+        EXPECT(result.reason.empty());
+      }
+
+      SECTION("200 with a status other than OK")
+      {
+        frame->responses = {R"({"status":"Failed","reason":"double spend"})"};
+        while (!done)
+        {
+          io.restart();
+          io.run_one();
+        }
+
+        EXPECT(frame->responses.size() == 0);
+        EXPECT(result.error == lwsf::error::send_not_ok);
+        EXPECT(result.reason.empty());
+      }
     }
 
     SECTION("login_is_new")

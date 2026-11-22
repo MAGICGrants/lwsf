@@ -41,6 +41,8 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
+#include <system_error>
 #include <unordered_map>
 #include <type_traits>
 #include <variant>
@@ -278,6 +280,13 @@ namespace lwsf { namespace internal { namespace backend
   LWSF_WIRE_DECLARE_OBJECT(account);
   LWSF_WIRE_DECLARE_OBJECT(account::polyseed);
 
+  //! Outcome of `wallet::send_tx`.
+  struct send_result
+  {
+    std::error_code error;
+    std::string reason; //!< Daemon's reason (printable ASCII), only with `error::send_rejected`
+  };
+
   //! All functions should provide the strong-exception guarantee
   struct wallet
   {
@@ -408,6 +417,6 @@ namespace lwsf { namespace internal { namespace backend
     using decoys_callable = void(expect<std::vector<rpc::random_outputs>>);
     static void get_decoys(std::shared_ptr<wallet> self, rpc::get_random_outs_request&& req, std::function<decoys_callable> f);
 
-    static void send_tx(std::shared_ptr<wallet> slef, epee::byte_slice tx_bytes, std::function<void(std::error_code)> f);
+    static void send_tx(std::shared_ptr<wallet> slef, epee::byte_slice tx_bytes, std::function<void(send_result)> f);
   };
 }}} // lwsf // internal // backend

@@ -55,6 +55,7 @@ namespace lwsf
     invalid_scheme,     //!< Invalid network scheme
     network_type,       //!< Mismatch on network type
     send_not_ok,        //!< `send_tx` status was NOT `OK`.
+    send_rejected,      //!< `send_tx` got HTTP 422: the daemon rejected the tx
     subaddr_ahead,      //!< Server limits on subaddresses affects lookahead
     subaddr_disabled,   //!< Server has subaddresses disabled
     subaddr_local,      //!< Local limits on subaddresses too small
