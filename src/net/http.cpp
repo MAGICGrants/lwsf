@@ -563,9 +563,10 @@ namespace lwsf { namespace internal { namespace http
       std::function<callback_func> f;
       boost::asio::ip::tcp::resolver resolver;
       const std::size_t iteration;
+      bool timed_out; //!< Set by this attempt's own connect timer
 
       frame(client_state& self, std::function<callback_func>&& f)
-        : f(std::move(f)), resolver(self.strand.context()), iteration(self.iteration)
+        : f(std::move(f)), resolver(self.strand.context()), iteration(self.iteration), timed_out(false)
       {}
     };
 
@@ -613,6 +614,7 @@ namespace lwsf { namespace internal { namespace http
               LWSF_VERIFY(frame_ && self_);
               assert(self_->strand.running_in_this_thread());
 
+              frame_->timed_out = true;
               frame_->resolver.cancel();
               self_->close();
             }
@@ -638,7 +640,12 @@ namespace lwsf { namespace internal { namespace http
           else
             MERROR("Failed to resolve TCP/IP address for " << self.host << ": " << error.message());
 
-          if (self_->iteration <= frame_->iteration)
+          /* The connect timer's `close()` moves `iteration`, but the caller is
+            still waiting on this attempt: without an answer its requests stay
+            queued, and no later request starts a new connection. */
+          if (frame_->timed_out)
+            frame_->f(boost::asio::error::timed_out);
+          else if (self_->iteration <= frame_->iteration)
             frame_->f(error);
         }
       }

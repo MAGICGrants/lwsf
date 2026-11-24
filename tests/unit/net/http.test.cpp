@@ -218,6 +218,37 @@ LWS_CASE("net::http")
       EXPECT(actual == boost::system::error_code{boost::asio::error::operation_aborted});
     }
 
+    SECTION("connect that outlasts the connect timer")
+    {
+      // 192.0.2.1 (TEST-NET-1) is never routed, so a direct connect to it
+      // hangs until the connect timer fires. Without a network it fails at
+      // once instead, and every request must be answered either way.
+      client.init(io, "192.0.2.1", "", 80, epee::net_utils::ssl_support_t::e_ssl_support_disabled);
+
+      std::array<bool, 3> answered{};
+      std::array<std::error_code, 3> errors{};
+      client.get_async("/first", [&] (std::error_code error, auto) { answered[0] = true; errors[0] = error; });
+      client.get_async("/queued", [&] (std::error_code error, auto) { answered[1] = true; errors[1] = error; });
+
+      io.restart();
+      io.run();
+
+      EXPECT(answered[0]);
+      EXPECT(answered[1]);
+      EXPECT(errors[0] != std::error_code{});
+      EXPECT(errors[1] == errors[0]);
+
+      // The client is not left waiting on the dead attempt: a later request
+      // starts a new one.
+      client.get_async("/later", [&] (std::error_code error, auto) { answered[2] = true; errors[2] = error; });
+
+      io.restart();
+      io.run();
+
+      EXPECT(answered[2]);
+      EXPECT(errors[2] == errors[0]);
+    }
+
     SECTION("response timeout")
     {
       std::error_code actual;

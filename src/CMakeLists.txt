@@ -41,6 +41,7 @@ set(lwsf_sources
   transaction_history.cpp
   transaction_info.cpp
   utils/ascii.cpp
+  utils/file.cpp
   utils/encrypted_file.cpp
   wallet.cpp
   wallet_manager.cpp
@@ -54,6 +55,7 @@ set(lwsf_headers
   transaction_history.h
   transaction_info.h
   utils/ascii.h
+  utils/file.h
   utils/encrypted_file.h
   utils/numeric.h
   wallet.h
@@ -71,7 +73,13 @@ set(LWSF_POLYSEED_LIBRARY "")
 if (NOT ("${LWSF_POLYSEED_SOURCE}" STREQUAL ""))
   list(APPEND LWSF_COMPILE_DEFINITIONS "LWSF_POLYSEED_ENABLE")
   set(LWSF_POLYSEED_INCLUDE "${LWSF_POLYSEED_SOURCE}/include")
-  set(LWSF_POLYSEED_LIBRARY polyseed)
+  # polyseed 3 builds both a shared `polyseed` and a static `polyseed_static`;
+  # earlier releases built a single `polyseed`, static when STATIC was set.
+  if (TARGET polyseed_static)
+    set(LWSF_POLYSEED_LIBRARY polyseed_static)
+  else()
+    set(LWSF_POLYSEED_LIBRARY polyseed)
+  endif()
 endif()
 
 target_compile_definitions(lwsf-api PUBLIC ${LWSF_COMPILE_DEFINITIONS})

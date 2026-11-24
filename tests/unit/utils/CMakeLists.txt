@@ -26,5 +26,5 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-add_library(lwsf-unit-utils OBJECT ascii.test.cpp)
+add_library(lwsf-unit-utils OBJECT ascii.test.cpp file.test.cpp)
 target_link_libraries(lwsf-unit-utils PRIVATE lwsf-unit-framework lwsf-api)

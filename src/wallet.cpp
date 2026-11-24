@@ -29,13 +29,6 @@
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "wallet.h"
 
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-  #include <fcntl.h>
-#elif defined(_WIN32)
-  #include <fileapi.h>
-  #include <handleapi.h>
-#endif
-
 #include <algorithm>
 #include <boost/filesystem.hpp>
 #include <boost/numeric/conversion/cast.hpp>
@@ -67,6 +60,7 @@
 #include "subaddress_minor.h"
 #include "transaction_history.h"
 #include "utils/encrypted_file.h"
+#include "utils/file.h"
 #include "wire.h"
 #include "wire/msgpack.h"
 
@@ -182,50 +176,6 @@ namespace lwsf { namespace internal
     {
       return calculate_fee_from_weight(base_fee, estimate_tx_weight(n_inputs, n_outputs, mixin, extra_size), fee_mask);
     }
-
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-    bool atomic_file_write(const boost::filesystem::path& filename, const boost::filesystem::path& directory, epee::byte_slice contents) noexcept
-    {
-      const int fd =
-        open(filename.c_str(), O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
-      if (fd < 0)
-        return false;
-
-      bool rc = false;
-      if (0 <= write(fd, contents.data(), contents.size()) && 0 <= fsync(fd))
-      {
-        const char* cwd = directory.c_str();
-        if (strcmp(cwd, "") == 0)
-          cwd = ".";
-        const int dir = open(cwd, O_RDONLY);
-        if (0 <= dir)
-        {
-          if (0 <= fsync(dir))
-            rc = true;
-          close(dir);
-        }
-      }
-
-      close(fd);
-      return rc;
-    }
-#elif defined(_WIN32)
-    bool atomic_file_write(const boost::filesystem::path& filename, const boost::filesystem::path&, epee::byte_slice contents) noexcept
-    {
-      HANDLE file = CreateFileW(filename.c_str(), (GENERIC_READ | GENERIC_WRITE), 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-      if (file == INVALID_HANDLE_VALUE)
-        return false;
-
-      bool rc = false;
-      if (WriteFile(file, contents.data(), contents.size(), nullptr, nullptr))
-        rc = FlushFileBuffers(file);
-
-      rc &= CloseHandle(file);
-      return rc;
-    }
-#else
-   #error atomic_file_write not implemented for this platform
-#endif
 
     class need_more_sources final : public std::exception
     {
@@ -599,14 +549,32 @@ namespace lwsf { namespace internal
   {
     try
     {
-      epee::byte_slice file = try_load(filename_ + ".new", wallet_file_magic);
-      if (file.empty())
-        file = try_load(filename_, wallet_file_magic);
+      // A .new left behind is a save that was never renamed into place: either
+      // complete, and newer than the wallet file, or cut short by a full disk
+      // or a kill mid-write. Only a .new that decrypts is used; otherwise the
+      // wallet file, which a failed save never touches, is the good copy.
+      epee::byte_slice plaintext;
+      {
+        epee::byte_slice pending = try_load(filename_ + ".new", wallet_file_magic);
+        if (!pending.empty())
+        {
+          auto decrypted = decrypt(std::move(pending), epee::strspan<std::uint8_t>(password_));
+          if (decrypted)
+            plaintext = std::move(*decrypted);
+          else
+            MWARNING("Unfinished wallet save does not decrypt; opening the wallet file instead");
+        }
+      }
 
-      if (file.empty())
-        throw std::runtime_error{"Unable to open wallet file " + filename_};
+      if (plaintext.empty())
+      {
+        epee::byte_slice file = try_load(filename_, wallet_file_magic);
+        if (file.empty())
+          throw std::runtime_error{"Unable to open wallet file " + filename_};
+        plaintext = decrypt(std::move(file), epee::strspan<std::uint8_t>(password_)).value();
+      }
 
-      if (std::error_code error = data_.wallet->from_bytes(decrypt(std::move(file), epee::strspan<std::uint8_t>(password_)).value()))
+      if (std::error_code error = data_.wallet->from_bytes(std::move(plaintext)))
         throw std::system_error{error};
 
       // lock not needed; data_ was created and unique to us
@@ -874,8 +842,18 @@ namespace lwsf { namespace internal
       const boost::filesystem::path directory =
         boost::filesystem::path{real_path}.remove_filename();
 
+      // A leftover .new is a save that was never renamed into place. A
+      // complete one is newer than the wallet file and is kept, so a failed
+      // write below still leaves the newest save in place. One cut short (a
+      // full disk, a kill mid-write) would replace a good wallet with a broken
+      // one, so it is deleted instead. Decrypting is what tells them apart.
       if (boost::filesystem::exists(new_file))
-        boost::filesystem::rename(new_file, file);
+      {
+        if (verify_password(new_file.string(), password_))
+          boost::filesystem::rename(new_file, file);
+        else
+          boost::filesystem::remove(new_file);
+      }
 
       // blocks until file and directory contents are synced
       epee::byte_slice blob =

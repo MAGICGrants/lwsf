@@ -30,7 +30,7 @@ add_library(lwsf-unit-framework framework.test.cpp)
 target_include_directories(lwsf-unit-framework PUBLIC "${lwsf_SOURCE_DIR}/src" "${lwsf_SOURCE_DIR}/tests/unit")
 target_link_libraries(lwsf-unit-framework)
 
-add_executable(lwsf-unit main.cpp backend.test.cpp rpc.test.cpp)
+add_executable(lwsf-unit main.cpp backend.test.cpp rpc.test.cpp wallet_file.test.cpp)
 
 add_subdirectory(net)
 add_subdirectory(utils)
