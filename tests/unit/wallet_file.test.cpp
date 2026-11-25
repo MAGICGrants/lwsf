@@ -92,7 +92,10 @@ LWS_CASE("wallet file survives unfinished saves")
     const temp_dir dir{};
     const std::string path = (dir.path / "wallet").string();
     const std::string pending = path + ".new";
-    Monero::WalletManager* const manager = lwsf::WalletManagerFactory::getWalletManager();
+    // One manager for the whole run, as an app keeps one. getWalletManager
+    // returns a new one on every call, and Monero::WalletManager has no
+    // virtual destructor, so it cannot be deleted through that pointer.
+    static Monero::WalletManager* const manager = lwsf::WalletManagerFactory::getWalletManager();
 
     {
       Monero::Wallet* const created =

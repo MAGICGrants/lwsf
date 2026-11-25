@@ -95,7 +95,9 @@ namespace lwsf { namespace internal
 #elif defined(_WIN32)
   bool atomic_file_write(const boost::filesystem::path& filename, const boost::filesystem::path&, epee::byte_slice contents) noexcept
   {
-    HANDLE file = CreateFileW(filename.c_str(), (GENERIC_READ | GENERIC_WRITE), 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    // CREATE_NEW, like O_EXCL above: never truncate a file that is already
+    // there, so the failure path below only deletes what this call created.
+    HANDLE file = CreateFileW(filename.c_str(), (GENERIC_READ | GENERIC_WRITE), 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE)
       return false;
 
