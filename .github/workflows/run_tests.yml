@@ -18,6 +18,10 @@ env:
   # macOS has no nproc; an empty -j would run every compile at once.
   BUILD: 'cmake --build "$GITHUB_WORKSPACE/lwsf/build" -j$(nproc 2>/dev/null || sysctl -n hw.logicalcpu)'
   RUN: 'ctest --test-dir "$GITHUB_WORKSPACE/lwsf/build" --output-on-failure'
+  # Monero's release branch does not build against OpenSSL 4, which Arch,
+  # Homebrew and MSYS2 now ship. This applies master's one-line fix,
+  # 4f73cfea ("epee: fix build with OpenSSL 4.0"); it also builds with OpenSSL 3.
+  OPENSSL4_FIX: 'git -c safe.directory="*" -C "$GITHUB_WORKSPACE/monero" fetch --depth=2 origin 4f73cfea6d37bc1eccab1e395fc526c94cbb99ba && git -c safe.directory="*" -C "$GITHUB_WORKSPACE/monero" diff 4f73cfea6d37bc1eccab1e395fc526c94cbb99ba~1 4f73cfea6d37bc1eccab1e395fc526c94cbb99ba | git -c safe.directory="*" -C "$GITHUB_WORKSPACE/monero" apply'
 
 jobs:
   # The sanitizer, linux and windows jobs build against Monero's release
@@ -47,6 +51,8 @@ jobs:
         with:
           path: ${{github.workspace}}/lwsf
           submodules: recursive
+      - name: Apply Monero's OpenSSL 4 fix
+        run: ${{env.OPENSSL4_FIX}}
       - name: Configure LWSF
         run: cmake -DLWSF_SANITIZER=${{matrix.sanitizer}} ${{env.CONFIGURE}}
       - name: Build LWSF
@@ -94,6 +100,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: ${{github.workspace}}/lwsf
+      - name: Apply Monero's OpenSSL 4 fix
+        run: ${{env.OPENSSL4_FIX}}
       - name: Configure LWS
         run: cmake ${{env.CONFIGURE}}
       - name: Build LWS
@@ -138,6 +146,9 @@ jobs:
         with:
           path: ${{github.workspace}}/lwsf
           submodules: recursive
+      - name: Apply Monero's OpenSSL 4 fix
+        if: matrix.branch == 'release-v0.18'
+        run: ${{env.OPENSSL4_FIX}}
       - name: Configure LWS (master)
         if: matrix.branch == 'master'
         run: cmake $OPENSSL_CMAKE_FLAG -DLWSF_MASTER_ENABLE=ON ${{env.CONFIGURE}}
@@ -187,6 +198,9 @@ jobs:
         with:
           path: ${{github.workspace}}/lwsf
           submodules: recursive
+      - name: Apply Monero's OpenSSL 4 fix
+        shell: bash
+        run: ${{env.OPENSSL4_FIX}}
       - name: Configure LWS
         run: cmake ${{env.CONFIGURE}}
       - name: Build LWSF
