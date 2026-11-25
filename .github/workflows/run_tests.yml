@@ -202,7 +202,10 @@ jobs:
         shell: bash
         run: ${{env.OPENSSL4_FIX}}
       - name: Configure LWS
-        run: cmake ${{env.CONFIGURE}}
+        # As Monero's own Windows build does: without ARCH, its ARCH_ID is
+        # "AMD64", which RandomX does not match, so RandomX leaves out the x86
+        # JIT that its headers still reference and the link fails.
+        run: cmake -DARCH=x86-64 ${{env.CONFIGURE}}
       - name: Build LWSF
         run: ${{env.BUILD}}
       - name: Run Tests
